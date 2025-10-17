@@ -15,10 +15,8 @@ st.set_page_config(
 # --- Securely load the API key ---
 api_key = None
 try:
-    # For Streamlit Community Cloud deployment
     api_key = st.secrets["PERPLEXITY_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # For local development
     try:
         with open("secrets.toml", "r") as f:
             secrets = toml.load(f)
@@ -64,13 +62,12 @@ def get_perplexity_response(messages, model, use_schema=False):
         response = client.chat.completions.create(**params)
         return response.choices[0].message.content
     except Exception as e:
-        st.session_state.error = f"API Error: {e}"
-        # Attempt to parse a more specific error message if available
+        # Extract a more user-friendly error from the API response body if possible
         try:
-            error_body = json.loads(str(e).split('body=')[-1].strip("'"))
-            st.session_state.error = f"API Error: {error_body['error']['message']}"
+            error_details = json.loads(e.body)
+            st.session_state.error = f"API Error: {error_details['error']['message']}"
         except:
-            pass # Stick with the generic error
+            st.session_state.error = f"An unexpected API error occurred: {e}"
         return None
 
 # --- Core Game Logic ---
@@ -90,7 +87,7 @@ def start_quiz(topic):
 
 def next_question():
     turn_data = {
-        **st.session_state.current_question,
+        'question_data': st.session_state.current_question,
         'user_answer': st.session_state.current_question['options'][st.session_state.selected_option_index],
         'is_correct': st.session_state.selected_option_index == st.session_state.current_question['correct_option_index'],
     }
@@ -101,22 +98,28 @@ def next_question():
         return
 
     # *** THIS IS THE CORRECTED LOGIC ***
-    messages = [{'role': 'system', 'content': 'You are an AI quiz master. Always respond in the requested JSON format.'}]
+    # Rebuild the conversation history from scratch to ensure valid order
+    messages = [{'role': 'system', 'content': 'You are an AI quiz master who generates the next logical question based on the conversation history. Always respond in the requested JSON format.'}]
     
-    # Rebuild the conversation history, ensuring roles alternate correctly.
+    # Start with the initial topic prompt
+    messages.append({'role': 'user', 'content': f'Let\'s start a quiz on "{st.session_state.topic}".'})
+    
+    # Replay the conversation history
     for turn in st.session_state.history:
-        # The AI's turn (the question it asked)
-        messages.append({'role': 'assistant', 'content': json.dumps({'question_text': turn['question_text'], 'options': turn['options']})})
-        
-        # The user's turn (their answer and the request for the next question)
-        # We combine the answer feedback and the new instruction into a single user message.
-        is_last_turn = turn == st.session_state.history[-1]
-        user_content = f"I answered \"{turn['user_answer']}\". This was {'correct' if turn['is_correct'] else 'incorrect'}."
-        if is_last_turn:
-            user_content += "\n\nBased on our conversation, generate the next logical question."
-
-        messages.append({'role': 'user', 'content': user_content})
-
+        # Assistant's turn (the question it asked)
+        messages.append({
+            'role': 'assistant',
+            'content': json.dumps(turn['question_data']) # Pass the structured data back
+        })
+        # User's turn (their answer)
+        messages.append({
+            'role': 'user',
+            'content': f"My answer was \"{turn['user_answer']}\"."
+        })
+    
+    # The last message is now a 'user' message. The API will generate the next 'assistant' message.
+    # The system prompt guides it to generate a new question. This structure is valid.
+    
     with st.spinner("Generating next question..."):
         response_content = get_perplexity_response(messages, 'sonar-pro', use_schema=True)
         if response_content:
@@ -126,7 +129,9 @@ def next_question():
 def end_quiz():
     st.session_state.game_state = 'summary'
     transcript = "\n".join(
-        f"Q: {turn['question_text']}\nYour Answer: {turn['user_answer']} ({'Correct' if turn['is_correct'] else 'Incorrect'})\nCorrect Answer: {turn['options'][turn['correct_option_index']]}\n"
+        f"Q: {turn['question_data']['question_text']}\n"
+        f"Your Answer: {turn['user_answer']} ({'Correct' if turn['is_correct'] else 'Incorrect'})\n"
+        f"Correct Answer: {turn['question_data']['options'][turn['question_data']['correct_option_index']]}\n"
         for turn in st.session_state.history
     )
     messages = [
@@ -139,11 +144,10 @@ def end_quiz():
             st.session_state.current_question = {'summary': summary_content}
 
 def restart_game():
-    st.session_state.game_state = 'start'
-    st.session_state.topic = ''
-    st.session_state.history = []
-    st.session_state.current_question = None
-    reset_turn_state()
+    # Full reset of the session state
+    for key in st.session_state.keys():
+        del st.session_state[key]
+    st.rerun()
 
 def reset_turn_state():
     st.session_state.selected_option_index = None
@@ -156,9 +160,8 @@ st.title("🧠 Curiosity Quiz")
 
 if st.session_state.error:
     st.error(st.session_state.error)
-    if st.button("Start Over"):
-        restart_game()
-        st.rerun()
+    if st.button("Start Over", on_click=restart_game):
+        pass
 
 elif st.session_state.game_state == 'start':
     st.write("What are you curious about today?")
@@ -207,4 +210,5 @@ elif st.session_state.game_state == 'summary' and st.session_state.current_quest
     with col1:
         st.button("Dig Deeper (V2)", on_click=lambda: st.toast("This feature is coming soon!"), use_container_width=True)
     with col2:
-        st.button("Start a New Quiz", on_click=restart_game, type="primary", use_container_width=True)
+        if st.button("Start a New Quiz", type="primary", use_container_width=True):
+            restart_game()
