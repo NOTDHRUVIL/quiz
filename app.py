@@ -62,8 +62,9 @@ def get_perplexity_response(messages, model, use_schema=False):
         response = client.chat.completions.create(**params)
         return response.choices[0].message.content
     except Exception as e:
-        # Extract a more user-friendly error from the API response body if possible
+        # Try to parse a more specific error message from the API if possible
         try:
+            # The error object from the SDK might have a 'body' attribute with the raw response
             error_details = json.loads(e.body)
             st.session_state.error = f"API Error: {error_details['error']['message']}"
         except:
@@ -93,32 +94,16 @@ def next_question():
     }
     st.session_state.history.append(turn_data)
     
-    if len(st.session_state.history) >= 5: # End quiz after 5 questions
+    if len(st.session_state.history) >= 5:
         end_quiz()
         return
 
-    # *** THIS IS THE CORRECTED LOGIC ***
-    # Rebuild the conversation history from scratch to ensure valid order
     messages = [{'role': 'system', 'content': 'You are an AI quiz master who generates the next logical question based on the conversation history. Always respond in the requested JSON format.'}]
-    
-    # Start with the initial topic prompt
     messages.append({'role': 'user', 'content': f'Let\'s start a quiz on "{st.session_state.topic}".'})
     
-    # Replay the conversation history
     for turn in st.session_state.history:
-        # Assistant's turn (the question it asked)
-        messages.append({
-            'role': 'assistant',
-            'content': json.dumps(turn['question_data']) # Pass the structured data back
-        })
-        # User's turn (their answer)
-        messages.append({
-            'role': 'user',
-            'content': f"My answer was \"{turn['user_answer']}\"."
-        })
-    
-    # The last message is now a 'user' message. The API will generate the next 'assistant' message.
-    # The system prompt guides it to generate a new question. This structure is valid.
+        messages.append({'role': 'assistant', 'content': json.dumps(turn['question_data'])})
+        messages.append({'role': 'user', 'content': f"My answer was \"{turn['user_answer']}\"."})
     
     with st.spinner("Generating next question..."):
         response_content = get_perplexity_response(messages, 'sonar-pro', use_schema=True)
@@ -128,6 +113,9 @@ def next_question():
 
 def end_quiz():
     st.session_state.game_state = 'summary'
+    # FIX: Clear the old question data immediately to prevent the KeyError
+    st.session_state.current_question = None 
+    
     transcript = "\n".join(
         f"Q: {turn['question_data']['question_text']}\n"
         f"Your Answer: {turn['user_answer']} ({'Correct' if turn['is_correct'] else 'Incorrect'})\n"
@@ -138,15 +126,20 @@ def end_quiz():
         {'role': 'system', 'content': "You are an AI learning coach. Analyze the user's quiz performance and provide a detailed, encouraging summary in Markdown."},
         {'role': 'user', 'content': f'The quiz on "{st.session_state.topic}" has ended. Here is the transcript:\n\n{transcript}\n\nProvide a learning analysis with these sections:\n\n### Summary of Topics\n\n### Your Learning Analysis\n\n### What You\'ve Learned'},
     ]
-    with st.spinner("Analyzing your results..."):
-        summary_content = get_perplexity_response(messages, 'sonar-deep-research')
-        if summary_content:
-            st.session_state.current_question = {'summary': summary_content}
+    
+    # We don't use a spinner here because the UI will show one based on the state
+    summary_content = get_perplexity_response(messages, 'sonar-deep-research')
+    if summary_content:
+        st.session_state.current_question = {'summary': summary_content}
+    # If it fails, current_question remains None, and the error will be displayed by the main UI handler.
 
 def restart_game():
     # Full reset of the session state
+    keys_to_keep = [] # Add any keys you might want to persist in the future
     for key in st.session_state.keys():
-        del st.session_state[key]
+        if key not in keys_to_keep:
+            del st.session_state[key]
+    # st.experimental_rerun() is deprecated, st.rerun() is the new standard
     st.rerun()
 
 def reset_turn_state():
@@ -158,11 +151,13 @@ def reset_turn_state():
 
 st.title("🧠 Curiosity Quiz")
 
+# This is the main error handler for the whole app
 if st.session_state.error:
     st.error(st.session_state.error)
     if st.button("Start Over", on_click=restart_game):
         pass
 
+# --- Start Screen ---
 elif st.session_state.game_state == 'start':
     st.write("What are you curious about today?")
     with st.form("topic_form"):
@@ -172,6 +167,7 @@ elif st.session_state.game_state == 'start':
             start_quiz(topic_input)
             st.rerun()
 
+# --- Quiz Screen ---
 elif st.session_state.game_state == 'quiz' and st.session_state.current_question:
     q = st.session_state.current_question
     question_number = len(st.session_state.history) + 1
@@ -202,13 +198,18 @@ elif st.session_state.game_state == 'quiz' and st.session_state.current_question
             next_question()
             st.rerun()
 
-elif st.session_state.game_state == 'summary' and st.session_state.current_question:
-    st.header("Quiz Summary")
-    st.markdown(st.session_state.current_question['summary'])
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.button("Dig Deeper (V2)", on_click=lambda: st.toast("This feature is coming soon!"), use_container_width=True)
-    with col2:
-        if st.button("Start a New Quiz", type="primary", use_container_width=True):
-            restart_game()
+# --- Summary Screen ---
+elif st.session_state.game_state == 'summary':
+    # FIX: This block now handles the loading state and the success state separately
+    if st.session_state.current_question: # This will only be true on success
+        st.header("Quiz Summary")
+        st.markdown(st.session_state.current_question['summary'])
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.button("Dig Deeper (V2)", on_click=lambda: st.toast("This feature is coming soon!"), use_container_width=True)
+        with col2:
+            if st.button("Start a New Quiz", type="primary", use_container_width=True):
+                restart_game()
+    elif not st.session_state.error: # If there's no question and no error, we are loading
+        st.spinner("Analyzing your results...")
