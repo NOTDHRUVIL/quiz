@@ -1,4 +1,4 @@
 
 streamlit
-perplexity-ai
+perplexityai
 toml
