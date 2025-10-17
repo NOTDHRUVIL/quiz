@@ -1,7 +1,4 @@
-# Specify a compatible Python version for deployment
-python==3.11
 
-# Your app's libraries
 streamlit
 perplexity-ai
 toml
