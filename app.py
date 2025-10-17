@@ -65,6 +65,12 @@ def get_perplexity_response(messages, model, use_schema=False):
         return response.choices[0].message.content
     except Exception as e:
         st.session_state.error = f"API Error: {e}"
+        # Attempt to parse a more specific error message if available
+        try:
+            error_body = json.loads(str(e).split('body=')[-1].strip("'"))
+            st.session_state.error = f"API Error: {error_body['error']['message']}"
+        except:
+            pass # Stick with the generic error
         return None
 
 # --- Core Game Logic ---
@@ -94,12 +100,22 @@ def next_question():
         end_quiz()
         return
 
+    # *** THIS IS THE CORRECTED LOGIC ***
     messages = [{'role': 'system', 'content': 'You are an AI quiz master. Always respond in the requested JSON format.'}]
-    for turn in st.session_state.history:
-        messages.append({'role': 'assistant', 'content': f"Question: {turn['question_text']}"})
-        messages.append({'role': 'user', 'content': f"My answer was \"{turn['user_answer']}\". This was {'correct' if turn['is_correct'] else 'incorrect'}."})
     
-    messages.append({'role': 'user', 'content': 'Based on our conversation, generate the next logical question.'})
+    # Rebuild the conversation history, ensuring roles alternate correctly.
+    for turn in st.session_state.history:
+        # The AI's turn (the question it asked)
+        messages.append({'role': 'assistant', 'content': json.dumps({'question_text': turn['question_text'], 'options': turn['options']})})
+        
+        # The user's turn (their answer and the request for the next question)
+        # We combine the answer feedback and the new instruction into a single user message.
+        is_last_turn = turn == st.session_state.history[-1]
+        user_content = f"I answered \"{turn['user_answer']}\". This was {'correct' if turn['is_correct'] else 'incorrect'}."
+        if is_last_turn:
+            user_content += "\n\nBased on our conversation, generate the next logical question."
+
+        messages.append({'role': 'user', 'content': user_content})
 
     with st.spinner("Generating next question..."):
         response_content = get_perplexity_response(messages, 'sonar-pro', use_schema=True)
